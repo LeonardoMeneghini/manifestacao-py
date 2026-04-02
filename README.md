@@ -25,3 +25,6 @@
 	5.3) regex rígida demais
 6) Inserida lista de verificação para capturar o nome da Secretaria/Órgão (sigla de todas as UTs):"PGM"; "SMGG"; (...)
 7) Inserido critérios para "PROCESSO SEI", restringindo o seguinte formato:  "00.0.000000000-0".
+8) Validação por “score” de confiança do OCR;
+9) Correção automática de caracteres (0 ↔ O, 1 ↔ I);
+10) Log de processos inválidos (debug profissional)
