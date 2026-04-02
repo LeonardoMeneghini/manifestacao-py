@@ -1,5 +1,4 @@
-# Extração - Manifestão de compra v 2 1 0
-
+# Extração - Manifestão de compra v 3 0 0
 import pytesseract
 from pdf2image import convert_from_path
 import pandas as pd
@@ -8,18 +7,35 @@ import re
 
 pdf_path = "/home/leonardomeneghini/PyCharmMiscProject/pdf_unido.pdf"
 saida_csv = "saida.csv"
+log_path = "log_problemas.txt"
 
 dados_finais = []
-
-def normalizar_valor(valor):
-    valor = valor.replace("R$", "").replace(" ", "")
-    valor = valor.replace(".", "").replace(",", ".")
-    try:
-        return float(valor)
-    except:
-        return None
+logs = []
 
 reader = PdfReader(pdf_path)
+
+# 🔹 LISTA FIXA DE ÓRGÃOS
+orgaos_validos = [
+    "PGM","SMGG","SMIDH","SMAS","SMDETE","SMPG","SMGOV","SMEL","SMC","SMF",
+    "SMAMUS","SMSURB","SMOI","SMP","SMTC","SMAP","SMMU","SMED","SMS",
+    "SMSEG","DMAE","DEMHAB","DMLU","PREVIMPA","EPTC","DEFESA CIVIL","DCPA"
+]
+
+# 🔹 Regex
+regex_processo = r'\b\d{2}\.[A-Za-z0-9]\.[A-Za-z0-9]{9}-[A-Za-z0-9]\b'
+regex_total = r'R\$\s?\d{1,3}(?:\.\d{3})*,\d{2}'
+
+# 🔹 Correção OCR (0↔O, 1↔I)
+def corrigir_ocr(texto):
+    texto = texto.replace("O", "0").replace("I", "1")
+    return texto
+
+# 🔹 Normalização
+def normalizar_linha(linha):
+    linha = re.sub(r'\s*\.\s*', '.', linha)
+    linha = re.sub(r'\s*-\s*', '-', linha)
+    linha = re.sub(r'\s+', ' ', linha)
+    return linha.strip()
 
 for i in range(1, len(reader.pages) + 1):
     pages = convert_from_path(pdf_path, first_page=i, last_page=i)
@@ -28,15 +44,17 @@ for i in range(1, len(reader.pages) + 1):
     df = pytesseract.image_to_data(
         page,
         lang="por",
-        config="--psm 6",
+        config="--psm 4",
         output_type=pytesseract.Output.DATAFRAME
     )
 
     df = df.dropna(subset=["text"])
 
-    # 🔥 AGRUPAMENTO POR POSIÇÃO (ESSENCIAL)
-    df["top_round"] = (df["top"] // 10) * 10
+    # 🔥 FILTRO DE CONFIANÇA OCR
+    df = df[df["conf"] > 60]
 
+    # 🔥 AGRUPAMENTO POR LINHA
+    df["top_round"] = (df["top"] // 10) * 10
     linhas = df.groupby("top_round")
 
     linhas_texto = []
@@ -46,68 +64,72 @@ for i in range(1, len(reader.pages) + 1):
         linha = " ".join(palavras)
         linhas_texto.append(linha)
 
-    # 🔥 DEBUG (veja isso rodando!)
-    # for l in linhas_texto:
-    #     print(l)
+    # 🔥 CONTEXTO
+    orgao_atual = None
+    processo_atual = None
+    buffer_linha = ""
 
-    # 🔥 EXTRAÇÃO INTELIGENTE
     for linha in linhas_texto:
 
-        # procura código
-        codigo_match = re.search(r'\b\d{5,}\b', linha)
-        if not codigo_match:
-            continue
+        linha = corrigir_ocr(linha)
+        linha = normalizar_linha(linha)
 
-        codigo = codigo_match.group()
+        linha_completa = buffer_linha + " " + linha
 
-        # procura quantidade (último número pequeno)
-        qt_match = re.findall(r'\b\d+\b', linha)
-        qt = None
-        if len(qt_match) >= 2:
-            qt = qt_match[-1]
+        # 🔹 PROCESSO SEI
+        processo_match = re.search(regex_processo, linha_completa)
 
-        # procura valor
-        valor_match = re.search(r'R?\$?\s?\d[\d\.,]+', linha)
-        if not valor_match:
-            continue
+        if processo_match:
+            processo_atual = processo_match.group()
+            buffer_linha = ""
+        else:
+            # tenta detectar algo parecido (para log)
+            possivel = re.search(r'\d{2}.*-.*\d', linha_completa)
+            if possivel:
+                logs.append(f"[PAG {i}] Possível processo inválido: {linha_completa}")
+            buffer_linha = linha
 
-        valor_raw = valor_match.group()
-        valor = normalizar_valor(valor_raw)
+        # 🔹 ÓRGÃO
+        linha_upper = linha.upper()
 
-        if valor is None:
-            continue
-
-        # 🔥 órgão = primeira palavra válida
-        partes = linha.split()
-        orgao = None
-
-        for p in partes:
-            if re.match(r'^[A-Za-z]{3,12}$', p):
-                orgao = p
+        for org in orgaos_validos:
+            if org in linha_upper:
+                orgao_atual = org
                 break
 
-        if not orgao:
-            continue
+        # 🔹 TOTAL
+        totais = re.findall(regex_total, linha)
 
-        dados_finais.append({
-            "ÓRGÃO": orgao,
-            "CÓDIGO": codigo,
-            "QT": int(qt) if qt else None,
-            "VALOR": valor
-        })
+        if totais and orgao_atual:
+            for total in totais:
+                if not processo_atual:
+                    logs.append(f"[PAG {i}] TOTAL sem processo: {linha}")
+
+                dados_finais.append({
+                    "ÓRGÃO": orgao_atual,
+                    "PROCESSO SEI": processo_atual,
+                    "TOTAL": total.strip()
+                })
 
     del page
     del pages
 
-# 🔹 DataFrame garantido
-df_final = pd.DataFrame(dados_finais, columns=["ÓRGÃO", "CÓDIGO", "QT", "VALOR"])
+# 🔹 DataFrame final
+df_final = pd.DataFrame(dados_finais, columns=["ÓRGÃO", "PROCESSO SEI", "TOTAL"])
 
 print(f"Registros encontrados: {len(df_final)}")
 
 if not df_final.empty:
     df_final = df_final.drop_duplicates()
-    df_final = df_final.sort_values(by="VALOR", ascending=False)
 
 df_final.to_csv(saida_csv, index=False, encoding="utf-8-sig")
 
+# 🔹 SALVAR LOG
+with open(log_path, "w", encoding="utf-8") as f:
+    for log in logs:
+        f.write(log + "\n")
+
 print("Processamento concluído com sucesso!")
+print(f"Log salvo em: {log_path}")
+
+
