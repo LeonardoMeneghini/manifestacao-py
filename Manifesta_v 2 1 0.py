@@ -1,7 +1,5 @@
-# Extração - Manifestão de compra v 4 2 0 
+# Extração - Manifestão de compra v 4 3 0 
 import fitz
-import pytesseract
-from pdf2image import convert_from_path
 import pandas as pd
 import re
 
@@ -10,15 +8,25 @@ saida_csv = "saida.csv"
 
 dados_finais = []
 
-regex_processo = r'\d{2}\.\d\.\d{7,}-\d'
+# 🔹 Regex
+regex_processo_parcial = r'\d{2}\.\d\.\d{7,}-?'
+regex_processo_final = r'\d{2}\.\d\.\d{7,}-\d'
 regex_total = r'R\$\s?\d{1,3}(?:\.\d{3})*,\d{2}'
+
+# 🔹 Lista oficial
+orgaos_validos = {
+    "PGM","SMGG","SMIDH","SMAS","SMDETE","SMPG","SMGOV","SMEL","SMC","SMF",
+    "SMAMUS","SMSURB","SMOI","SMP","SMTC","SMAP","SMMU","SMED","SMS",
+    "SMSEG","DMAE","DEMHAB","DMLU","PREVIMPA","EPTC","DEFESA","CIVIL","DCPA"
+}
+
+TOL = 20  # tolerância de coluna
 
 # =========================================
 # 🔥 DETECTA COLUNAS PELO CABEÇALHO
 # =========================================
 
 def detectar_colunas(df):
-
     x_proc = x_org = x_total = None
 
     for _, row in df.iterrows():
@@ -37,6 +45,31 @@ def detectar_colunas(df):
 
 
 # =========================================
+# 🔥 RECONSTRÓI PROCESSO QUEBRADO
+# =========================================
+
+def reconstruir_processo(textos):
+    buffer = ""
+
+    for t in textos:
+        t = t.strip()
+
+        if re.match(regex_processo_parcial, t):
+            buffer += t
+
+            if re.fullmatch(regex_processo_final, buffer):
+                return buffer
+
+        elif buffer:
+            buffer += t
+
+            if re.fullmatch(regex_processo_final, buffer):
+                return buffer
+
+    return None
+
+
+# =========================================
 # 🔥 PROCESSAMENTO
 # =========================================
 
@@ -48,7 +81,14 @@ def processar(df, x_proc, x_org, x_total):
 
         grupo = grupo.sort_values(by="x0")
 
-        processo = None
+        textos = grupo["text"].tolist()
+
+        # 🔹 PROCESSO (reconstruído)
+        processo = reconstruir_processo(textos)
+
+        if not processo:
+            continue
+
         orgao = None
         total = None
 
@@ -57,23 +97,19 @@ def processar(df, x_proc, x_org, x_total):
             texto = str(row["text"]).strip()
             x = row["x0"]
 
-            # PROCESSO
-            if x < x_org:
-                if re.fullmatch(regex_processo, texto):
-                    processo = texto
-
-            # ÓRGÃO
-            elif x_org <= x < x_total:
+            # 🔹 ÓRGÃO (com tolerância)
+            if (x_org - TOL) <= x <= (x_org + 150):
                 txt = texto.upper()
 
-                if 3 <= len(txt) <= 8 and txt.isalpha():
+                if txt in orgaos_validos:
                     orgao = txt
 
-            # TOTAL
-            elif x >= x_total:
+            # 🔹 TOTAL (com tolerância)
+            if x >= (x_total - TOL):
                 if re.fullmatch(regex_total, texto):
                     total = texto
 
+        # 🔹 Validação final
         if processo and orgao and total:
             dados_finais.append({
                 "ÓRGÃO": orgao,
@@ -99,22 +135,34 @@ for page in doc:
         "x0","y0","x1","y1","text","block","line","word"
     ])
 
-    # 🔥 Detecta colunas dinamicamente
     x_proc, x_org, x_total = detectar_colunas(df)
 
     if not x_org or not x_total:
         continue
 
-    print(f"DEBUG COLUNAS: PROC={x_proc}, ORG={x_org}, TOTAL={x_total}")
+    print(f"[DEBUG] PROC={x_proc} ORG={x_org} TOTAL={x_total}")
 
     processar(df, x_proc, x_org, x_total)
 
+
 # =========================================
-# 🔥 FINAL
+# 🔥 FINAL + LOG PROFISSIONAL
 # =========================================
 
-df_final = pd.DataFrame(dados_finais).drop_duplicates()
+df_final = pd.DataFrame(dados_finais)
 
-print(f"✔ Registros: {len(df_final)}")
+antes = len(df_final)
+
+df_final = df_final.drop_duplicates()
+
+depois = len(df_final)
+
+print(f"✔ Registros extraídos: {depois}")
+print(f"🧹 Duplicados removidos: {antes - depois}")
+
+if df_final.empty:
+    print("❌ Nenhum registro encontrado — verificar estrutura do PDF")
 
 df_final.to_csv(saida_csv, index=False, encoding="utf-8-sig")
+
+print("🚀 Finalizado com sucesso")
