@@ -1,44 +1,52 @@
-# Extração - Manifestão de compra v 4 1 0 
+# Extração - Manifestão de compra v 4 2 0 
 import fitz
 import pytesseract
 from pdf2image import convert_from_path
 import pandas as pd
 import re
 
-pdf_path = "pdf_unido.pdf"
+pdf_path = "/mnt/data/manifesta_2026.pdf"
 saida_csv = "saida.csv"
 
 dados_finais = []
 
-# 🔹 Regex
 regex_processo = r'\d{2}\.\d\.\d{7,}-\d'
 regex_total = r'R\$\s?\d{1,3}(?:\.\d{3})*,\d{2}'
 
-# 🔹 Correção OCR
-def corrigir_texto(texto):
-    texto = texto.upper().strip()
-    texto = texto.replace("0", "O")
-    texto = texto.replace("1", "I")
-    return texto
-
-# 🔹 Faixas de coluna (AJUSTADAS PELO PRINT)
-COL_PROCESSO_MAX_X = 200
-COL_ORGAO_MIN_X = 200
-COL_ORGAO_MAX_X = 350
-COL_TOTAL_MIN_X = 900
-
 # =========================================
-# 🔥 PROCESSAMENTO POR COORDENADA
+# 🔥 DETECTA COLUNAS PELO CABEÇALHO
 # =========================================
 
-def processar(df):
+def detectar_colunas(df):
 
-    # Normaliza eixo Y (linha)
-    df["linha"] = (df["top"] // 10) * 10 if "top" in df else df["y0"].round(-1)
+    x_proc = x_org = x_total = None
+
+    for _, row in df.iterrows():
+        texto = str(row["text"]).upper()
+
+        if "PROCESSO" in texto:
+            x_proc = row["x0"]
+
+        elif "ÓRGÃO" in texto or "ORGAO" in texto:
+            x_org = row["x0"]
+
+        elif "TOTAL" in texto:
+            x_total = row["x0"]
+
+    return x_proc, x_org, x_total
+
+
+# =========================================
+# 🔥 PROCESSAMENTO
+# =========================================
+
+def processar(df, x_proc, x_org, x_total):
+
+    df["linha"] = df["y0"].round(-1)
 
     for _, grupo in df.groupby("linha"):
 
-        grupo = grupo.sort_values(by=["left"] if "left" in df else ["x0"])
+        grupo = grupo.sort_values(by="x0")
 
         processo = None
         orgao = None
@@ -47,103 +55,66 @@ def processar(df):
         for _, row in grupo.iterrows():
 
             texto = str(row["text"]).strip()
-            x = row["left"] if "left" in df else row["x0"]
+            x = row["x0"]
 
-            # 🔹 PROCESSO
-            if x < COL_PROCESSO_MAX_X:
+            # PROCESSO
+            if x < x_org:
                 if re.fullmatch(regex_processo, texto):
                     processo = texto
 
-            # 🔹 ÓRGÃO (posição fixa)
-            if COL_ORGAO_MIN_X < x < COL_ORGAO_MAX_X:
-                texto_corrigido = corrigir_texto(texto)
+            # ÓRGÃO
+            elif x_org <= x < x_total:
+                txt = texto.upper()
 
-                if 3 <= len(texto_corrigido) <= 6:
-                    orgao = texto_corrigido
+                if 3 <= len(txt) <= 8 and txt.isalpha():
+                    orgao = txt
 
-            # 🔹 TOTAL
-            if x > COL_TOTAL_MIN_X:
+            # TOTAL
+            elif x >= x_total:
                 if re.fullmatch(regex_total, texto):
                     total = texto
 
-        # 🔹 Validação forte
         if processo and orgao and total:
-
             dados_finais.append({
                 "ÓRGÃO": orgao,
                 "PROCESSO SEI": processo,
                 "TOTAL": total
             })
 
+
 # =========================================
-# 🔥 DETECÇÃO AUTOMÁTICA (OCR / NÃO OCR)
+# 🔥 EXECUÇÃO
 # =========================================
 
 doc = fitz.open(pdf_path)
-
-usou_ocr = False
 
 for page in doc:
 
     words = page.get_text("words")
 
     if not words:
-        usou_ocr = True
-        break
+        continue
 
     df = pd.DataFrame(words, columns=[
         "x0","y0","x1","y1","text","block","line","word"
     ])
 
-    if df.empty:
-        usou_ocr = True
-        break
+    # 🔥 Detecta colunas dinamicamente
+    x_proc, x_org, x_total = detectar_colunas(df)
 
-    processar(df)
+    if not x_org or not x_total:
+        continue
 
-# =========================================
-# 🔥 FALLBACK OCR
-# =========================================
+    print(f"DEBUG COLUNAS: PROC={x_proc}, ORG={x_org}, TOTAL={x_total}")
 
-if usou_ocr or len(dados_finais) == 0:
-
-    print("⚠️ Ativando OCR...")
-
-    dados_finais.clear()
-
-    pages = convert_from_path(pdf_path)
-
-    for page in pages:
-
-        df = pytesseract.image_to_data(
-            page,
-            lang="por",
-            config="--psm 6",
-            output_type=pytesseract.Output.DATAFRAME
-        )
-
-        df = df.dropna(subset=["text"])
-
-        # 🔥 SCORE DE CONFIANÇA
-        df = df[df["conf"] > 50]
-
-        processar(df)
+    processar(df, x_proc, x_org, x_total)
 
 # =========================================
-# 🔥 LOG PROFISSIONAL
+# 🔥 FINAL
 # =========================================
 
-df_final = pd.DataFrame(dados_finais)
+df_final = pd.DataFrame(dados_finais).drop_duplicates()
 
-print(f"✔ Registros extraídos: {len(df_final)}")
-
-# Remover duplicados
-df_final = df_final.drop_duplicates()
-
-# Log de inconsistências
-if df_final.empty:
-    print("❌ Nenhum dado extraído — verificar OCR/layout")
+print(f"✔ Registros: {len(df_final)}")
 
 df_final.to_csv(saida_csv, index=False, encoding="utf-8-sig")
-
-print("🚀 Finalizado com sucesso")
