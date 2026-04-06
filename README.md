@@ -1,6 +1,6 @@
 # manifestacao-py
-## Versão: Extração - Manifestão de compra v 2 1 0
-## Nome do arquivo python: Manifesta_v 2 1 0.py
+## Versão: Extração - Manifestão de compra v 3 1 0
+## Nome do arquivo python: Manifesta_v 3 1 0.py
 ## Etapas da rotina 2026 será: 
 1) Acessa o SEI, baixa o último arquivo em PDF;
 2) Modificar o código: acrescentar mais um arquivo aos existentes => TODO;
@@ -28,3 +28,10 @@
 8) Validação por “score” de confiança do OCR;
 9) Correção automática de caracteres (0 ↔ O, 1 ↔ I);
 10) Log de processos inválidos (debug profissional)
+11) Falha na extração da sigla "Órgão":"SMMU": normalizar a linha removendo espaços e caracteres não alfanuméricos antes da comparação.
+12) PROCESSO SEI quebrado em linha:hífen fica no fim da linha e o dígito na próxima.
+Solução porposta:
+- Buffer inteligente;
+- Detecção quando termina com "-";
+- Concatenar com a próxima linha;
+13) 
