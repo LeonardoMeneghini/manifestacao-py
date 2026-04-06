@@ -1,10 +1,12 @@
-# Extração - Manifestão de compra v 4 4 0 
-import fitz  # PyMuPDF
+# Extração - Manifestão de compra v 4 5 0 
+import fitz
+import pytesseract
+from pdf2image import convert_from_path
 import pandas as pd
 import re
 
 # =========================================
-# 🔗 ETAPA 1: UNIR PDFs
+# 🔗 UNIR PDFs
 # =========================================
 
 pdf_1 = "/mnt/data/manifesta_2026.pdf"
@@ -13,21 +15,18 @@ pdf_unido = "/mnt/data/pdf_unido.pdf"
 
 def unir_pdfs(pdf1, pdf2, output):
     doc_final = fitz.open()
-
     for pdf in [pdf1, pdf2]:
         doc = fitz.open(pdf)
         doc_final.insert_pdf(doc)
-
     doc_final.save(output)
-    print("📎 PDFs unidos com sucesso!")
+    print("📎 PDFs unidos!")
 
 unir_pdfs(pdf_1, pdf_2, pdf_unido)
 
 # =========================================
-# 🔧 CONFIGURAÇÕES
+# 🔧 CONFIG
 # =========================================
 
-saida_csv = "saida.csv"
 dados_finais = []
 
 regex_processo_parcial = r'\d{2}\.\d\.\d{7,}-?'
@@ -43,25 +42,22 @@ orgaos_validos = {
 TOL = 20
 
 # =========================================
-# 🔍 DETECTA COLUNAS
+# 🔍 DETECTAR COLUNAS
 # =========================================
 
 def detectar_colunas(df):
-    x_proc = x_org = x_total = None
+    x_org = x_total = None
 
     for _, row in df.iterrows():
         texto = str(row["text"]).upper()
 
-        if "PROCESSO" in texto:
-            x_proc = row["x0"]
-
-        elif "ÓRGÃO" in texto or "ORGAO" in texto:
+        if "ÓRGÃO" in texto or "ORGAO" in texto:
             x_org = row["x0"]
 
         elif "TOTAL" in texto:
             x_total = row["x0"]
 
-    return x_proc, x_org, x_total
+    return x_org, x_total
 
 # =========================================
 # 🔧 RECONSTRUIR PROCESSO
@@ -75,34 +71,32 @@ def reconstruir_processo(textos):
 
         if re.match(regex_processo_parcial, t):
             buffer += t
-
             if re.fullmatch(regex_processo_final, buffer):
                 return buffer
 
         elif buffer:
             buffer += t
-
             if re.fullmatch(regex_processo_final, buffer):
                 return buffer
 
     return None
 
 # =========================================
-# 🔍 PROCESSAMENTO
+# 🔍 PROCESSAR LINHAS
 # =========================================
 
-def processar(df, x_org, x_total):
+def processar(df, x_org, x_total, pagina):
+
+    encontrados = 0
 
     df["linha"] = df["y0"].round(-1)
 
     for _, grupo in df.groupby("linha"):
 
         grupo = grupo.sort_values(by="x0")
-
         textos = grupo["text"].tolist()
 
         processo = reconstruir_processo(textos)
-
         if not processo:
             continue
 
@@ -110,53 +104,92 @@ def processar(df, x_org, x_total):
         total = None
 
         for _, row in grupo.iterrows():
-
             texto = str(row["text"]).strip()
             x = row["x0"]
 
-            # ÓRGÃO
             if (x_org - TOL) <= x <= (x_org + 150):
                 txt = texto.upper()
                 if txt in orgaos_validos:
                     orgao = txt
 
-            # TOTAL
             if x >= (x_total - TOL):
                 if re.fullmatch(regex_total, texto):
                     total = texto
 
         if processo and orgao and total:
+            encontrados += 1
             dados_finais.append({
                 "ÓRGÃO": orgao,
                 "PROCESSO SEI": processo,
-                "TOTAL": total
+                "TOTAL": total,
+                "PAGINA": pagina
             })
 
+    return encontrados
+
 # =========================================
-# 🚀 EXECUÇÃO
+# 🚀 EXECUÇÃO COM FALLBACK
 # =========================================
 
 doc = fitz.open(pdf_unido)
 
-for page in doc:
+for i, page in enumerate(doc):
+
+    print(f"\n📄 Página {i+1}")
 
     words = page.get_text("words")
 
-    if not words:
-        continue
+    # 🔥 Critério de falha
+    if not words or len(words) < 50:
+        usar_ocr = True
+        print("⚠️ Pouco texto → OCR ativado")
+    else:
+        usar_ocr = False
 
-    df = pd.DataFrame(words, columns=[
-        "x0","y0","x1","y1","text","block","line","word"
-    ])
+    if not usar_ocr:
+        df = pd.DataFrame(words, columns=[
+            "x0","y0","x1","y1","text","block","line","word"
+        ])
 
-    x_proc, x_org, x_total = detectar_colunas(df)
+        x_org, x_total = detectar_colunas(df)
 
-    if not x_org or not x_total:
-        continue
+        if not x_org or not x_total:
+            usar_ocr = True
+            print("⚠️ Colunas não detectadas → OCR ativado")
 
-    print(f"[DEBUG] ORG={x_org} TOTAL={x_total}")
+    # =========================================
+    # 🔥 OCR FALLBACK
+    # =========================================
+    if usar_ocr:
 
-    processar(df, x_org, x_total)
+        images = convert_from_path(pdf_unido, first_page=i+1, last_page=i+1)
+
+        df = pytesseract.image_to_data(
+            images[0],
+            lang="por",
+            config="--psm 6",
+            output_type=pytesseract.Output.DATAFRAME
+        )
+
+        df = df.dropna(subset=["text"])
+        df = df[df["conf"] > 50]
+
+        # normaliza nomes
+        df = df.rename(columns={"left": "x0", "top": "y0"})
+
+        print(f"🔎 OCR palavras: {len(df)}")
+
+        x_org, x_total = detectar_colunas(df)
+
+        if not x_org or not x_total:
+            print("❌ Falha total na página (nem OCR resolveu)")
+            continue
+
+    print(f"📍 Colunas → ORG={x_org} TOTAL={x_total}")
+
+    encontrados = processar(df, x_org, x_total, i+1)
+
+    print(f"✅ Registros encontrados na página: {encontrados}")
 
 # =========================================
 # 📊 FINAL
@@ -168,12 +201,10 @@ antes = len(df_final)
 df_final = df_final.drop_duplicates()
 depois = len(df_final)
 
-print(f"✔ Registros extraídos: {depois}")
+print("\n==============================")
+print(f"✔ TOTAL FINAL: {depois}")
 print(f"🧹 Duplicados removidos: {antes - depois}")
 
-if df_final.empty:
-    print("❌ Nenhum registro encontrado — revisar OCR/layout")
+df_final.to_csv("saida.csv", index=False, encoding="utf-8-sig")
 
-df_final.to_csv(saida_csv, index=False, encoding="utf-8-sig")
-
-print("🚀 Pipeline finalizado com sucesso!")
+print("🚀 FINALIZADO COM SUCESSO")
