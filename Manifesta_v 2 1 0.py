@@ -1,29 +1,49 @@
-# Extração - Manifestão de compra v 4 3 0 
-import fitz
+# Extração - Manifestão de compra v 4 4 0 
+import fitz  # PyMuPDF
 import pandas as pd
 import re
 
-pdf_path = "/mnt/data/manifesta_2026.pdf"
-saida_csv = "saida.csv"
+# =========================================
+# 🔗 ETAPA 1: UNIR PDFs
+# =========================================
 
+pdf_1 = "/mnt/data/manifesta_2026.pdf"
+pdf_2 = "/mnt/data/man-16-2026.pdf"
+pdf_unido = "/mnt/data/pdf_unido.pdf"
+
+def unir_pdfs(pdf1, pdf2, output):
+    doc_final = fitz.open()
+
+    for pdf in [pdf1, pdf2]:
+        doc = fitz.open(pdf)
+        doc_final.insert_pdf(doc)
+
+    doc_final.save(output)
+    print("📎 PDFs unidos com sucesso!")
+
+unir_pdfs(pdf_1, pdf_2, pdf_unido)
+
+# =========================================
+# 🔧 CONFIGURAÇÕES
+# =========================================
+
+saida_csv = "saida.csv"
 dados_finais = []
 
-# 🔹 Regex
 regex_processo_parcial = r'\d{2}\.\d\.\d{7,}-?'
 regex_processo_final = r'\d{2}\.\d\.\d{7,}-\d'
 regex_total = r'R\$\s?\d{1,3}(?:\.\d{3})*,\d{2}'
 
-# 🔹 Lista oficial
 orgaos_validos = {
     "PGM","SMGG","SMIDH","SMAS","SMDETE","SMPG","SMGOV","SMEL","SMC","SMF",
     "SMAMUS","SMSURB","SMOI","SMP","SMTC","SMAP","SMMU","SMED","SMS",
     "SMSEG","DMAE","DEMHAB","DMLU","PREVIMPA","EPTC","DEFESA","CIVIL","DCPA"
 }
 
-TOL = 20  # tolerância de coluna
+TOL = 20
 
 # =========================================
-# 🔥 DETECTA COLUNAS PELO CABEÇALHO
+# 🔍 DETECTA COLUNAS
 # =========================================
 
 def detectar_colunas(df):
@@ -43,9 +63,8 @@ def detectar_colunas(df):
 
     return x_proc, x_org, x_total
 
-
 # =========================================
-# 🔥 RECONSTRÓI PROCESSO QUEBRADO
+# 🔧 RECONSTRUIR PROCESSO
 # =========================================
 
 def reconstruir_processo(textos):
@@ -68,12 +87,11 @@ def reconstruir_processo(textos):
 
     return None
 
-
 # =========================================
-# 🔥 PROCESSAMENTO
+# 🔍 PROCESSAMENTO
 # =========================================
 
-def processar(df, x_proc, x_org, x_total):
+def processar(df, x_org, x_total):
 
     df["linha"] = df["y0"].round(-1)
 
@@ -83,7 +101,6 @@ def processar(df, x_proc, x_org, x_total):
 
         textos = grupo["text"].tolist()
 
-        # 🔹 PROCESSO (reconstruído)
         processo = reconstruir_processo(textos)
 
         if not processo:
@@ -97,19 +114,17 @@ def processar(df, x_proc, x_org, x_total):
             texto = str(row["text"]).strip()
             x = row["x0"]
 
-            # 🔹 ÓRGÃO (com tolerância)
+            # ÓRGÃO
             if (x_org - TOL) <= x <= (x_org + 150):
                 txt = texto.upper()
-
                 if txt in orgaos_validos:
                     orgao = txt
 
-            # 🔹 TOTAL (com tolerância)
+            # TOTAL
             if x >= (x_total - TOL):
                 if re.fullmatch(regex_total, texto):
                     total = texto
 
-        # 🔹 Validação final
         if processo and orgao and total:
             dados_finais.append({
                 "ÓRGÃO": orgao,
@@ -117,12 +132,11 @@ def processar(df, x_proc, x_org, x_total):
                 "TOTAL": total
             })
 
-
 # =========================================
-# 🔥 EXECUÇÃO
+# 🚀 EXECUÇÃO
 # =========================================
 
-doc = fitz.open(pdf_path)
+doc = fitz.open(pdf_unido)
 
 for page in doc:
 
@@ -140,29 +154,26 @@ for page in doc:
     if not x_org or not x_total:
         continue
 
-    print(f"[DEBUG] PROC={x_proc} ORG={x_org} TOTAL={x_total}")
+    print(f"[DEBUG] ORG={x_org} TOTAL={x_total}")
 
-    processar(df, x_proc, x_org, x_total)
-
+    processar(df, x_org, x_total)
 
 # =========================================
-# 🔥 FINAL + LOG PROFISSIONAL
+# 📊 FINAL
 # =========================================
 
 df_final = pd.DataFrame(dados_finais)
 
 antes = len(df_final)
-
 df_final = df_final.drop_duplicates()
-
 depois = len(df_final)
 
 print(f"✔ Registros extraídos: {depois}")
 print(f"🧹 Duplicados removidos: {antes - depois}")
 
 if df_final.empty:
-    print("❌ Nenhum registro encontrado — verificar estrutura do PDF")
+    print("❌ Nenhum registro encontrado — revisar OCR/layout")
 
 df_final.to_csv(saida_csv, index=False, encoding="utf-8-sig")
 
-print("🚀 Finalizado com sucesso")
+print("🚀 Pipeline finalizado com sucesso!")
