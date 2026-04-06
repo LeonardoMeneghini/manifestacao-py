@@ -1,9 +1,6 @@
-# Extração - Manifestão de compra v 2 1 0
-
-import pytesseract
-from pdf2image import convert_from_path
+# Extração - Manifestão de compra v 4 0 0 
+import fitz  # PyMuPDF
 import pandas as pd
-from PyPDF2 import PdfReader
 import re
 
 pdf_path = "/home/leonardomeneghini/PyCharmMiscProject/pdf_unido.pdf"
@@ -11,102 +8,86 @@ saida_csv = "saida.csv"
 
 dados_finais = []
 
-def normalizar_valor(valor):
-    valor = valor.replace("R$", "").replace(" ", "")
-    valor = valor.replace(".", "").replace(",", ".")
-    try:
-        return float(valor)
-    except:
-        return None
+# 🔹 Regex
+regex_processo = r'\d{2}\.[A-Za-z0-9]\.[A-Za-z0-9]{9}-[A-Za-z0-9]'
+regex_total = r'R\$\s?\d{1,3}(?:\.\d{3})*,\d{2}'
 
-reader = PdfReader(pdf_path)
+# 🔹 ÓRGÃOS válidos
+orgaos_validos = [
+    "PGM","SMGG","SMIDH","SMAS","SMDETE","SMPG","SMGOV","SMEL","SMC","SMF",
+    "SMAMUS","SMSURB","SMOI","SMP","SMTC","SMAP","SMMU", "SMMU ","SMED","SMS",
+    "SMSEG","DMAE","DEMHAB","DMLU","PREVIMPA","EPTC","DEFESA CIVIL","DCPA"
+]
 
-for i in range(1, len(reader.pages) + 1):
-    pages = convert_from_path(pdf_path, first_page=i, last_page=i)
-    page = pages[0]
+doc = fitz.open(pdf_path)
 
-    df = pytesseract.image_to_data(
-        page,
-        lang="por",
-        config="--psm 6",
-        output_type=pytesseract.Output.DATAFRAME
-    )
+for page_num, page in enumerate(doc, start=1):
 
-    df = df.dropna(subset=["text"])
+    words = page.get_text("words")  
+    # estrutura: [x0, y0, x1, y1, "texto", block_no, line_no, word_no]
 
-    # 🔥 AGRUPAMENTO POR POSIÇÃO (ESSENCIAL)
-    df["top_round"] = (df["top"] // 10) * 10
+    df = pd.DataFrame(words, columns=[
+        "x0","y0","x1","y1","text","block","line","word"
+    ])
 
-    linhas = df.groupby("top_round")
+    # 🔥 agrupa por linha (y)
+    df["y_round"] = df["y0"].round(-1)
 
-    linhas_texto = []
+    linhas = df.groupby("y_round")
 
-    for _, grupo in linhas:
-        palavras = grupo.sort_values("left")["text"].tolist()
-        linha = " ".join(palavras)
-        linhas_texto.append(linha)
+    for _, linha in linhas:
 
-    # 🔥 DEBUG (veja isso rodando!)
-    # for l in linhas_texto:
-    #     print(l)
+        linha = linha.sort_values("x0")
 
-    # 🔥 EXTRAÇÃO INTELIGENTE
-    for linha in linhas_texto:
-
-        # procura código
-        codigo_match = re.search(r'\b\d{5,}\b', linha)
-        if not codigo_match:
-            continue
-
-        codigo = codigo_match.group()
-
-        # procura quantidade (último número pequeno)
-        qt_match = re.findall(r'\b\d+\b', linha)
-        qt = None
-        if len(qt_match) >= 2:
-            qt = qt_match[-1]
-
-        # procura valor
-        valor_match = re.search(r'R?\$?\s?\d[\d\.,]+', linha)
-        if not valor_match:
-            continue
-
-        valor_raw = valor_match.group()
-        valor = normalizar_valor(valor_raw)
-
-        if valor is None:
-            continue
-
-        # 🔥 órgão = primeira palavra válida
-        partes = linha.split()
+        processo = None
         orgao = None
+        totais = []
 
-        for p in partes:
-            if re.match(r'^[A-Za-z]{3,12}$', p):
-                orgao = p
+        # 🔹 Detecta PROCESSO
+        for _, row in linha.iterrows():
+            texto = str(row["text"])
+            if re.fullmatch(regex_processo, texto):
+                processo = texto
+                x_processo = row["x0"]
                 break
 
-        if not orgao:
+        if not processo:
             continue
 
-        dados_finais.append({
-            "ÓRGÃO": orgao,
-            "CÓDIGO": codigo,
-            "QT": int(qt) if qt else None,
-            "VALOR": valor
-        })
+        # 🔹 Detecta ÓRGÃO (à direita do processo)
+        candidatos = []
 
-    del page
-    del pages
+        for _, row in linha.iterrows():
+            texto = str(row["text"]).upper()
 
-# 🔹 DataFrame garantido
-df_final = pd.DataFrame(dados_finais, columns=["ÓRGÃO", "CÓDIGO", "QT", "VALOR"])
+            if row["x0"] > x_processo:
+                if texto in orgaos_validos:
+                    distancia = row["x0"] - x_processo
+                    candidatos.append((texto, distancia))
+
+        if candidatos:
+            orgao = sorted(candidatos, key=lambda x: x[1])[0][0]
+
+        # 🔹 Detecta TOTAL
+        for _, row in linha.iterrows():
+            texto = str(row["text"])
+            if re.fullmatch(regex_total, texto):
+                totais.append(texto)
+
+        # 🔹 Salva (um registro por TOTAL)
+        if orgao and totais:
+            for total in totais:
+                dados_finais.append({
+                    "ÓRGÃO": orgao,
+                    "PROCESSO SEI": processo,
+                    "TOTAL": total
+                })
+
+df_final = pd.DataFrame(dados_finais)
 
 print(f"Registros encontrados: {len(df_final)}")
 
-if not df_final.empty:
-    df_final = df_final.drop_duplicates()
-    df_final = df_final.sort_values(by="VALOR", ascending=False)
+df_final = df_final.drop_duplicates()
 
 df_final.to_csv(saida_csv, index=False, encoding="utf-8-sig")
 
