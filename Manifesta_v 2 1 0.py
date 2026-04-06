@@ -1,210 +1,171 @@
-# Extração - Manifestão de compra v 4 5 0 
-import fitz
+# Extração - Manifestão de compra v 4 6 0 
 import pytesseract
 from pdf2image import convert_from_path
 import pandas as pd
+from PyPDF2 import PdfReader
 import re
+from difflib import get_close_matches
 
-# =========================================
-# 🔗 UNIR PDFs
-# =========================================
-
-pdf_1 = "/mnt/data/manifesta_2026.pdf"
-pdf_2 = "/mnt/data/man-16-2026.pdf"
-pdf_unido = "/mnt/data/pdf_unido.pdf"
-
-def unir_pdfs(pdf1, pdf2, output):
-    doc_final = fitz.open()
-    for pdf in [pdf1, pdf2]:
-        doc = fitz.open(pdf)
-        doc_final.insert_pdf(doc)
-    doc_final.save(output)
-    print("📎 PDFs unidos!")
-
-unir_pdfs(pdf_1, pdf_2, pdf_unido)
-
-# =========================================
-# 🔧 CONFIG
-# =========================================
-
+pdf_path = "/home/leonardomeneghini/PyCharmMiscProject/pdf_unido.pdf"
+saida_csv = "saida.csv"
+log_path = "log_problemas.txt"
 dados_finais = []
+logs = []
+reader = PdfReader(pdf_path)
 
-regex_processo_parcial = r'\d{2}\.\d\.\d{7,}-?'
-regex_processo_final = r'\d{2}\.\d\.\d{7,}-\d'
-regex_total = r'R\$\s?\d{1,3}(?:\.\d{3})*,\d{2}'
-
-orgaos_validos = {
+orgaos_validos = [
     "PGM","SMGG","SMIDH","SMAS","SMDETE","SMPG","SMGOV","SMEL","SMC","SMF",
     "SMAMUS","SMSURB","SMOI","SMP","SMTC","SMAP","SMMU","SMED","SMS",
-    "SMSEG","DMAE","DEMHAB","DMLU","PREVIMPA","EPTC","DEFESA","CIVIL","DCPA"
+    "SMSEG","DMAE","DEMHAB","DMLU","PREVIMPA","EPTC","DEFESA CIVIL","DCPA"
+]
+
+# 🔹 Aliases heurísticos para erros típicos de OCR CID TrueType
+# Foco em SMMU, mas cobre os demais também
+aliases_ocr = {
+    # SMMU — confusões mais comuns: M→N, M→RN, U→O, U→V, espaço inserido
+    "SNMU":     "SMMU",
+    "SMMV":     "SMMU",
+    "SMMO":     "SMMU",
+    "SM MU":    "SMMU",
+    "SNMV":     "SMMU",
+    "SRNMU":    "SMMU",
+    "SMRNU":    "SMMU",
+    "SNIMU":    "SMMU",
+    # SMOI — O↔0 já tratado; I↔1 pode gerar SM01
+    "SM0I":     "SMOI",
+    "SM01":     "SMOI",
+    # SMED
+    "SNIED":    "SMED",
+    "SNIIED":   "SMED",
+    # SMAS
+    "SNIAS":    "SMAS",
+    # genéricos SM_ com N no lugar de M
+    "SNGG":     "SMGG",
+    "SNIDH":    "SMIDH",
+    "SNDETE":   "SMDETE",
 }
 
-TOL = 20
+regex_processo = r'\b\d{2}\.[A-Za-z0-9]\.[A-Za-z0-9]{9}-[A-Za-z0-9]\b'
+regex_total    = r'R\$\s?\d{1,3}(?:\.\d{3})*,\d{2}'
 
-# =========================================
-# 🔍 DETECTAR COLUNAS
-# =========================================
 
-def detectar_colunas(df):
-    x_org = x_total = None
+# 🔹 Correção OCR — aplicada SOMENTE ao número do processo
+def corrigir_ocr_processo(texto):
+    """Converte confusões O↔0 e I↔1 apenas para extrair o nº SEI."""
+    return texto.replace("O", "0").replace("I", "1")
 
-    for _, row in df.iterrows():
-        texto = str(row["text"]).upper()
 
-        if "ÓRGÃO" in texto or "ORGAO" in texto:
-            x_org = row["x0"]
+def normalizar_linha(linha):
+    linha = re.sub(r'\s*\.\s*', '.', linha)
+    linha = re.sub(r'\s*-\s*', '-', linha)
+    linha = re.sub(r'\s+', ' ', linha)
+    return linha.strip()
 
-        elif "TOTAL" in texto:
-            x_total = row["x0"]
 
-    return x_org, x_total
+# 🔹 Detecção heurística de órgão com múltiplas camadas
+def detectar_orgao(linha):
+    """
+    Tenta identificar o órgão na linha usando 3 estratégias em cascata:
+      1. Match exato (maiúsculas)
+      2. Lookup na tabela de aliases OCR
+      3. Fuzzy match via difflib (fallback tolerante)
+    Retorna (orgao_str | None, estrategia_usada)
+    """
+    linha_up = linha.upper()
 
-# =========================================
-# 🔧 RECONSTRUIR PROCESSO
-# =========================================
+    # --- Camada 1: match exato ---
+    for org in orgaos_validos:
+        if org in linha_up:
+            return org, "exato"
 
-def reconstruir_processo(textos):
-    buffer = ""
+    # --- Camada 2: aliases OCR ---
+    for alias, orgao_correto in aliases_ocr.items():
+        if alias in linha_up:
+            return orgao_correto, f"alias({alias})"
 
-    for t in textos:
-        t = t.strip()
+    # --- Camada 3: fuzzy por token ---
+    # Quebra a linha em tokens e testa cada um contra a lista de órgãos
+    tokens = re.findall(r'[A-Z]{2,}', linha_up)
+    for token in tokens:
+        matches = get_close_matches(token, orgaos_validos, n=1, cutoff=0.75)
+        if matches:
+            return matches[0], f"fuzzy({token}→{matches[0]})"
 
-        if re.match(regex_processo_parcial, t):
-            buffer += t
-            if re.fullmatch(regex_processo_final, buffer):
-                return buffer
+    return None, None
 
-        elif buffer:
-            buffer += t
-            if re.fullmatch(regex_processo_final, buffer):
-                return buffer
 
-    return None
+for i in range(1, len(reader.pages) + 1):
+    pages = convert_from_path(pdf_path, first_page=i, last_page=i, dpi=300)
+    page  = pages[0]
 
-# =========================================
-# 🔍 PROCESSAR LINHAS
-# =========================================
+    df = pytesseract.image_to_data(
+        page,
+        lang="por",
+        config="--psm 4",
+        output_type=pytesseract.Output.DATAFRAME
+    )
+    df = df.dropna(subset=["text"])
+    df = df[df["conf"] > 60]
 
-def processar(df, x_org, x_total, pagina):
+    df["top_round"] = (df["top"] // 10) * 10
+    linhas_texto = []
+    for _, grupo in df.groupby("top_round"):
+        palavras = grupo.sort_values("left")["text"].tolist()
+        linhas_texto.append(" ".join(palavras))
 
-    encontrados = 0
+    orgao_atual   = None
+    processo_atual = None
+    buffer_linha   = ""
 
-    df["linha"] = df["y0"].round(-1)
+    for linha in linhas_texto:
+        linha = normalizar_linha(linha)       # normaliza sem tocar letras
+        linha_completa = (buffer_linha + " " + linha).strip()
 
-    for _, grupo in df.groupby("linha"):
+        # 🔹 Processo SEI — aplica correção OCR só aqui
+        linha_corrigida = corrigir_ocr_processo(linha_completa)
+        processo_match  = re.search(regex_processo, linha_corrigida)
+        if processo_match:
+            processo_atual = processo_match.group()
+            buffer_linha   = ""
+        else:
+            possivel = re.search(r'\d{2}.*-.*\d', linha_corrigida)
+            if possivel:
+                logs.append(f"[PAG {i}] Possível processo inválido: {linha_completa}")
+            buffer_linha = linha
 
-        grupo = grupo.sort_values(by="x0")
-        textos = grupo["text"].tolist()
+        # 🔹 Órgão — usa detecção heurística multicamada
+        orgao_encontrado, estrategia = detectar_orgao(linha)
+        if orgao_encontrado:
+            if orgao_encontrado != orgao_atual:
+                logs.append(
+                    f"[PAG {i}] Órgão detectado via {estrategia}: "
+                    f"'{linha.strip()}' → {orgao_encontrado}"
+                )
+            orgao_atual = orgao_encontrado
 
-        processo = reconstruir_processo(textos)
-        if not processo:
-            continue
+        # 🔹 Total
+        totais = re.findall(regex_total, linha)
+        if totais and orgao_atual:
+            for total in totais:
+                if not processo_atual:
+                    logs.append(f"[PAG {i}] TOTAL sem processo: {linha}")
+                dados_finais.append({
+                    "ÓRGÃO":       orgao_atual,
+                    "PROCESSO SEI": processo_atual,
+                    "TOTAL":        total.strip()
+                })
 
-        orgao = None
-        total = None
+    del page, pages
 
-        for _, row in grupo.iterrows():
-            texto = str(row["text"]).strip()
-            x = row["x0"]
+df_final = pd.DataFrame(dados_finais, columns=["ÓRGÃO", "PROCESSO SEI", "TOTAL"])
+print(f"Registros encontrados: {len(df_final)}")
+if not df_final.empty:
+    df_final = df_final.drop_duplicates()
+df_final.to_csv(saida_csv, index=False, encoding="utf-8-sig")
 
-            if (x_org - TOL) <= x <= (x_org + 150):
-                txt = texto.upper()
-                if txt in orgaos_validos:
-                    orgao = txt
+with open(log_path, "w", encoding="utf-8") as f:
+    for log in logs:
+        f.write(log + "\n")
 
-            if x >= (x_total - TOL):
-                if re.fullmatch(regex_total, texto):
-                    total = texto
-
-        if processo and orgao and total:
-            encontrados += 1
-            dados_finais.append({
-                "ÓRGÃO": orgao,
-                "PROCESSO SEI": processo,
-                "TOTAL": total,
-                "PAGINA": pagina
-            })
-
-    return encontrados
-
-# =========================================
-# 🚀 EXECUÇÃO COM FALLBACK
-# =========================================
-
-doc = fitz.open(pdf_unido)
-
-for i, page in enumerate(doc):
-
-    print(f"\n📄 Página {i+1}")
-
-    words = page.get_text("words")
-
-    # 🔥 Critério de falha
-    if not words or len(words) < 50:
-        usar_ocr = True
-        print("⚠️ Pouco texto → OCR ativado")
-    else:
-        usar_ocr = False
-
-    if not usar_ocr:
-        df = pd.DataFrame(words, columns=[
-            "x0","y0","x1","y1","text","block","line","word"
-        ])
-
-        x_org, x_total = detectar_colunas(df)
-
-        if not x_org or not x_total:
-            usar_ocr = True
-            print("⚠️ Colunas não detectadas → OCR ativado")
-
-    # =========================================
-    # 🔥 OCR FALLBACK
-    # =========================================
-    if usar_ocr:
-
-        images = convert_from_path(pdf_unido, first_page=i+1, last_page=i+1)
-
-        df = pytesseract.image_to_data(
-            images[0],
-            lang="por",
-            config="--psm 6",
-            output_type=pytesseract.Output.DATAFRAME
-        )
-
-        df = df.dropna(subset=["text"])
-        df = df[df["conf"] > 50]
-
-        # normaliza nomes
-        df = df.rename(columns={"left": "x0", "top": "y0"})
-
-        print(f"🔎 OCR palavras: {len(df)}")
-
-        x_org, x_total = detectar_colunas(df)
-
-        if not x_org or not x_total:
-            print("❌ Falha total na página (nem OCR resolveu)")
-            continue
-
-    print(f"📍 Colunas → ORG={x_org} TOTAL={x_total}")
-
-    encontrados = processar(df, x_org, x_total, i+1)
-
-    print(f"✅ Registros encontrados na página: {encontrados}")
-
-# =========================================
-# 📊 FINAL
-# =========================================
-
-df_final = pd.DataFrame(dados_finais)
-
-antes = len(df_final)
-df_final = df_final.drop_duplicates()
-depois = len(df_final)
-
-print("\n==============================")
-print(f"✔ TOTAL FINAL: {depois}")
-print(f"🧹 Duplicados removidos: {antes - depois}")
-
-df_final.to_csv("saida.csv", index=False, encoding="utf-8-sig")
-
-print("🚀 FINALIZADO COM SUCESSO")
+print("Processamento concluído!")
+print(f"Log salvo em: {log_path}")
