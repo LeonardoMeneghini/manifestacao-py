@@ -3,6 +3,7 @@
 ### Juntar PDFs: DOING   
 ### Extração dos dados: extrator_sei_Dv3.py
 ---------------Etapas da abordagem------------------------------------------------
+
 0) Acessa o SEI, baixa o arquivo completo;
 1) Separa por período (2026);
 2) Acessa o SEI, baixa o último arquivo em PDF;
@@ -12,6 +13,7 @@
 6) Arquivo de saída em CSV
 7) Cria os paines no Power BI
 -----------------------Versão 5--------------------------------------------------
+   
 1. Melhorias
 1.1 Há um conflito estrutural na "ORGAOS_VALIDOS":
 "SMP" é uma sigla legítima no conjunto
